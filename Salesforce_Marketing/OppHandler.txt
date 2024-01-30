@@ -1,0 +1,986 @@
+/*******************************
+* Name: OpportunityHandler
+ * Description: Handler class for Survey Trigger
+ * Created by : Anna Rodriguez - Slalom
+ * Date Modified   Modified By        Description
+ * 13 Nov 2019     Piyush Mittal      https://sim.amazon.com/issues/SF-17353 Creating Case for Counter Location Opportunity
+ * 09 Dec 2019     Ravi Mishra        https://sim.amazon.com/issues/SF-17659 Check if Contract Signed by Partner at Company or Location level
+ * 08 Aug 2021     Ravi Mishra        Moved PB business logic to APEX due to CPU Limit Exception
+ * 08 Aug 2021     Ravi Mishra        Method to create Case
+ * 09 DEC 2021     Rakesh Nimma       Update case hold from opportunity when case hold is marked as true on opportunity for EU & NA
+ * 28 Apr 2022     Rakesh Nimma       #W-000873 Contract Parent Opportunity to Parent Account 
+ * 11 May 2022     Rakesh Nimma       #W-000873 Update opportunity Records w.r.t Contract_signed_by_partner__c on it's relavent Account.
+ * 20 Jun 2022     Parvathy TP        #W-001203 Overwrite currencyISOCode from UserCurrency to 'USD'
+ * 23 Aug 2022     SeshaGiri L        #W-001303 - Dobby record type automation for Account, opportunity and case
+ * 15 Dec 2022     Ankit T            #W-001476 Account Automation Improvements - Implementation
+ * 01 Feb 2023     Ankit T            #W-001733 For Dobby EU accounts, case isn't created automatically
+ * 09 Mar 2023     Ankit T            #W-001954 Automate Salesforce Case Activation
+ * 20 Mar 2023     Biswadip Dey       #W-001226 Kiosk Status/Substatus Tracking
+ * 21 Mar 2023     Ankit T            #W-001939 Apartment Locker Renewal Workflow Phase 2 
+  ********************************/
+public with sharing class OpportunityHandler{
+    
+    public static Boolean onlyFirstTime = true;
+    public static Boolean iscaseTriggerContext = true;
+    public static Boolean onlyFirstTimeValidation = true;
+    
+    public static void addOppContactRoles(List<Opportunity> newOps){
+        
+        //Shruti G 15th July : Add record type checks for Apartment Locker and Dobby Na
+        List<OpportunityContactRole> ocrsToCreate = new List<OpportunityContactRole>();
+        try{
+            Set<Id> accountIds = new Set<Id>();
+            for(Opportunity o :newOps){
+                accountIds.add(o.AccountId);
+            }
+            
+            if(accountIds.size() == 0) return;
+            system.debug('+++++OppAccountId'+AccountIds);
+            List<String> oppConRoles = UtilityMethods.getOCRRoles();    
+            Map<Id, List<AccountContactRelation>> acctIdToACR = new Map<Id, List<AccountContactRelation>>();
+            if(accountIds!=Null){
+                if(accountIds.size()>0){
+                    
+            for(AccountContactRelation acr :[SELECT AccountId, ContactId, Roles, Communication_Preference__c FROM AccountContactRelation WHERE AccountId in :accountIds]){
+                List<AccountContactRelation> acrList = acctIdToACR.get(acr.AccountId) == null ? new List<AccountContactRelation>() : acctIdToACR.get(acr.AccountId);
+                acrList.add(acr);
+                acctIdToACR.put(acr.AccountId, acrList);
+                
+            }
+                }
+            }
+            
+            if(acctIdToACR.size() == 0) return;
+            
+            
+            for(Opportunity o :newOps){
+                for(AccountContactRelation a :acctIdToACR.get(o.AccountId)){
+                    String commPreference = a.Communication_Preference__c == null ? 'No Communications' : a.Communication_Preference__c;
+                    OpportunityContactRole ocr = new OpportunityContactRole(
+                        ContactId = a.ContactId,
+                        OpportunityId = o.Id,
+                        Role = commPreference
+                    );
+                    ocrsToCreate.add(ocr);
+                }           
+            }
+            
+            
+            insert ocrsToCreate;
+        } catch(Exception e){
+            UtilityMethods.createDebugLog('OpportunityHandler','Error in creating Opp Contact Roles', ocrsToCreate, e);
+        }
+    }/* End of method */ 
+    
+    
+    /**********************************************************************************************************
+    @Developer : Ravi Mishra 
+    @Date: 09/12/2019
+    @Decription: Check if Contract Signed by Partner at Company or Location level
+    @Detail : https://sim.amazon.com/issues/SF-17659
+    ***********************************************************************************************************/
+    public static void validateContractSignedByPartner( List<Opportunity> triggerNew, Map<id, Opportunity> oldmap, Boolean isInsert ){        
+        
+        set<id> setAccId = new set<id>();
+        set<id> setParentAccId = new set<id>();
+        
+        List<Account> lstAcc = new List<Account>();
+        List<Opportunity> lstOpp = new List<Opportunity>();
+        
+        String oppRecTypeLC = Schema.sObjectType.Opportunity.getRecordTypeInfosByName().get('Location').getRecordTypeId();  
+        String oppRecTypeCC = Schema.sObjectType.Opportunity.getRecordTypeInfosByName().get('Company').getRecordTypeId(); 
+        onlyFirstTimeValidation = false;
+        
+        //Map of unchecked "Contract Signed By Partner" at Location level
+        map<id, id> mapUncheckedCSBP = new map<id, id>();
+        Map<String, String> accId2ParentAccIdMap = new Map<String,String>();
+        Map<String, Opportunity> parentAccId2OppId = new Map<String, Opportunity>();
+        try{
+            for(Opportunity oppAll : triggerNew ){
+                if(isInsert){                    
+                    if(oppAll.recordTypeId == oppRecTypeLC && String.isNotBlank( oppAll.Store_Id__c ) && !oppAll.Contract_signed_by_partner__c && oppAll.AccountId != null){
+                        mapUncheckedCSBP.put(oppAll.id, oppAll.AccountId);
+                        setAccId.add(oppAll.AccountId);
+                    } 
+                }
+                else{
+                    if(oppAll.recordTypeId == oppRecTypeLC && String.isBlank(oldmap.get(oppAll.id).Store_Id__c) && String.isNotBlank( oppAll.Store_Id__c ) && !oppAll.Contract_signed_by_partner__c && oppAll.AccountId != null){
+                        mapUncheckedCSBP.put(oppAll.id, oppAll.AccountId);
+                        setAccId.add(oppAll.AccountId);    
+                    }
+                }
+            }
+            
+            if(!setAccId.isEmpty()){
+                lstAcc = [SELECT id, name, parentid FROM account WHERE parentid != null AND id IN:setAccId];
+                if(!lstAcc.isEmpty()){
+                    for(Account objAcc: lstAcc){
+                        setParentAccId.add(objAcc.parentid); 
+                        accId2ParentAccIdMap.put( objAcc.id,objAcc.parentid );
+                    }
+                    
+                    if(!setParentAccId.isEmpty()){
+                        For(Opportunity eachOpp:  [SELECT id, name, AccountId, Contract_signed_by_partner__c FROM Opportunity WHERE accountid IN : setParentAccId AND recordTypeId=:oppRecTypeCC ]){
+                            parentAccId2OppId.put( eachOpp.AccountId, eachOpp);    
+                            
+                        }   
+                    }                                   
+                }            
+            }
+            
+            for(Opportunity eachOpp : triggerNew ){
+                if(mapUncheckedCSBP.containskey(eachOpp.id)){
+                    id accid = (id)mapUncheckedCSBP.get(eachOpp.id);
+                    if(accid != null && accId2ParentAccIdMap.containskey(accid)){
+                        string strParentId = (string)accId2ParentAccIdMap.get(accid);
+                        if(strParentId != null && parentAccId2OppId.containskey(strParentId)){
+                            Boolean isSigned = (Boolean)parentAccId2OppId.get(strParentId).Contract_signed_by_partner__c;
+                            if(!isSigned){
+                                eachOpp.addError(system.Label.Contract_Not_Signed);
+                            }                        
+                        }
+                        else{                            
+                            if(!parentAccId2OppId.containskey(strParentId))
+                                eachOpp.addError(system.Label.Contract_Not_Signed);
+                        }
+                        
+                    }
+                    
+                }
+            } 
+            
+        }
+        catch( exception ex ){ 
+            System.debug( 'Exception in validateContractSignedByPartner: Meassage --> '+ex.getMessage()+' Stack_trace --> '+ex.getStackTraceString() );
+        }
+    }/***************** Method to create Case - Added by Piyush Mittal on 13th Nov, 2019 *********************/ 
+    
+
+    //Ashi Saxena   
+    public static void updateLocationOppFromCompanyOpp(List<Opportunity> newOpp){
+        
+        list<opportunity> lstLocationOpp = new list<opportunity>();
+        Map<Id,Opportunity> companyAccIdWithOpportunity = new Map<Id,Opportunity>();
+        
+        Id recTypeId = Schema.SObjectType.Opportunity.getRecordTypeInfosByName().get('Company_Locker').getRecordTypeId();
+        Id recTypeId2 = Schema.SObjectType.Opportunity.getRecordTypeInfosByName().get('Location Locker').getRecordTypeId();
+        
+        try{
+             for(Opportunity opp : newOpp){     
+                if(opp.RecordTypeId == recTypeId && opp.Umbrella_Contract__c && (opp.Contract_signed_by_partner__c || opp.Contract_countersigned_by_Amazon__c))
+                {    system.debug('@@opp:' + opp);            
+                     companyAccIdWithOpportunity.put(opp.AccountId,opp);
+                }
+                 system.debug('@test====='+companyAccIdWithOpportunity);
+            }
+            
+            List<Opportunity> oppList = [Select id, RecordTypeId, Account.ParentId, Umbrella_Contract__c, Contract_signed_by_partner__c, Contract_countersigned_by_Amazon__c, Contract_Date__c FROM Opportunity WHERE RecordTypeId =: recTypeId2 AND Account.ParentId IN : companyAccIdWithOpportunity.keyset()];
+            system.debug('@oppList===='+oppList);
+            for(opportunity opp : oppList){
+              if(companyAccIdWithOpportunity.containsKey(opp.Account.ParentId)){
+                    opp.Contract_signed_by_partner__c = companyAccIdWithOpportunity.get(opp.Account.ParentId).Contract_signed_by_partner__c;
+                    opp.Contract_countersigned_by_Amazon__c = companyAccIdWithOpportunity.get(opp.Account.ParentId).Contract_countersigned_by_Amazon__c;
+                    System.debug('@@@@ opp.Contract_Date__c :' + opp.Contract_Date__c );
+                    if(opp.Contract_Date__c == null)  
+                        opp.Contract_Date__c = companyAccIdWithOpportunity.get(opp.Account.ParentId).Contract_Date__c;
+                    lstLocationOpp.add(opp);
+               }
+            }
+            if(!lstLocationOpp.isEmpty()){ 
+                List<Database.SaveResult> results = Database.Update(lstLocationOpp, false); 
+                for (Database.SaveResult result : results) {
+                    if (!result.isSuccess()){
+                        for (Database.Error err : result.getErrors()){
+                            System.debug('Exception in OpportunityHandler: '+ err.getStatusCode() + ' ' + err.getMessage());
+                        }
+                    }       
+                }
+            }
+        }catch(exception ex){ 
+            UtilityMethods.createDebugLog('OpportunityHandler','Errors of OpportunityHandler', lstLocationOpp, ex);
+            System.debug( 'Message --> '+ex.getMessage()+' Stack_trace --> '+ex.getStackTraceString() ); 
+        } 
+    }
+    // #W-001203
+    public static void updateOpportunityCurrency(List<Opportunity> newOpp){
+        for(Opportunity opp : newOpp){
+            System.debug('@@@Oppty default Currency:'+opp.currencyISOCode);
+            if (opp.CurrencyIsoCode != 'USD'){
+                opp.CurrencyIsoCode = 'USD';
+                System.debug('@@@Overwritting currency from user currency to USD:'+opp.currencyISOCode);
+            }     
+        }
+    }
+ /********************************************************************************************************************
+* Description : Update opportunity Records w.r.t Contract_signed_by_partner__c on it's relavent Account. 
+* Modifiedon    DeveloperName       UserStory
+* 11 May 2022   Rakesh Nimma        #W-000873
+* 15 Dec 2022   Ankit T             #W-001476 As per the story requirement I have added the "triggerContext" variable
+*********************************************************************************************************************/   
+    public static void CheckContractSigned(List<Opportunity> newOpp, Map<Id, Opportunity> oldMapOpp, string triggerContext){
+        
+        set<id> AccountId = new set<id>();
+        set<id> caseAccountId = new set<id>();
+        set<id> AccountIdNA = new set<id>();
+        map<id, Opportunity> ParentIdtoOpportunity = new map<id, Opportunity>();
+        map<string, Date> paymentDateValueMap = new map<string, Date>();
+        map<id, id> AccountIdToParentId = new map<id, id>();
+        map<id, Account> AccountIdMap = new map<id, Account>();
+        List<Account> lstAcc = new List<Account>();   
+        Id recTypeCompanyLocker = Schema.SObjectType.Opportunity.getRecordTypeInfosByName().get('Company_Locker').getRecordTypeId();
+        Id recTypeLocationLocker = Schema.SObjectType.Opportunity.getRecordTypeInfosByName().get('Location Locker').getRecordTypeId();
+        Id recTypeLocationLockerNA = Schema.SObjectType.Opportunity.getRecordTypeInfosByName().get('Location Locker NA').getRecordTypeId();
+
+        for(Opportunity opp : newOpp){
+            system.debug('++++++++++++newOpp '+newOpp);
+            if(triggerContext == ConstantVariableHandler.beforeInsert){
+                if(opp.RecordTypeId.equals(recTypeLocationLocker) && String.isNotBlank(opp.AccountId)){
+                    if(!AccountId.contains(opp.Id))
+                        AccountId.add(opp.AccountId);
+                    system.debug('++++++++++++AccountId '+AccountId);
+                }  
+                if(opp.RecordTypeId.equals(recTypeLocationLockerNA) && String.isNotBlank(opp.AccountId)){
+                    AccountIdNA.add(opp.AccountId);
+                }
+            }
+            //W-001476
+            if((opp.Contract_signed_by_partner__c == False || opp.Contract_countersigned_by_Amazon__c == False) && triggerContext == ConstantVariableHandler.beforeUpdate){
+                AccountIdNA.add(opp.AccountId);
+            }
+        }
+        if(!AccountIdNA.isEmpty()){ //rakenimm
+            for(Account a:[SELECT Id, name,Contract_signed_by_partner__c,Contract_Signed_By__c,APIError__c,parentid,recordTypeId,Probability_of_Contract__c,Contract_Date__c,Legal_Entity_PartnerId__c,PropertyId__c,Legal_Entity_Name__c,
+                           BillingCity, BillingCountry, BillingState, BillingStreet, BillingPostalCode, Legal_Entity_Partner_Version__c FROM account WHERE parentid != null AND id IN:AccountIdNA])
+            {
+                AccountIdMap.put(a.Id, a);
+            }
+            if(AccountIdMap.size() >0)
+            {
+                for(Opportunity o : newOpp){
+                    if(AccountIdMap.containskey(o.AccountId) && triggerContext == ConstantVariableHandler.beforeInsert)
+                    {
+                        o.Contract_signed_by_partner__c = AccountIdMap.get(o.AccountId).Contract_signed_by_partner__c;
+                        o.Contract_countersigned_by_Amazon__c = AccountIdMap.get(o.AccountId).Contract_signed_by_partner__c;
+                    }
+                    //W-001476
+                    if(o.Contract_signed_by_partner__c == False || o.Contract_countersigned_by_Amazon__c == False){
+                        if(AccountIdMap.get(o.AccountId).Contract_Signed_By__c == ConstantVariableHandler.Acc_ContractSignedBy_LockerPartner && 
+                           AccountIdMap.get(o.AccountId).recordTypeId == ConstantVariableHandler.recType_Account_LocationLockerEU){
+                               o.Contract_signed_by_partner__c = True;
+                           }
+                        if((AccountIdMap.get(o.AccountId).Contract_Signed_By__c == ConstantVariableHandler.Acc_ContractSignedBy_LockerBoth && 
+                            (AccountIdMap.get(o.AccountId).recordTypeId == ConstantVariableHandler.recType_Account_LocationLockerEU || 
+                             AccountIdMap.get(o.AccountId).recordTypeId == ConstantVariableHandler.recType_Account_LocationLockerNA)) ||
+                           (AccountIdMap.get(o.AccountId).Probability_of_Contract__c == ConstantVariableHandler.Acc_ProbabilityofContract_100ContractSigned && 
+                            AccountIdMap.get(o.AccountId).Contract_Signed_by_Partner__c == True && 
+                            (AccountIdMap.get(o.AccountId).recordTypeId == ConstantVariableHandler.recType_Account_LocationLockerEU || 
+                             AccountIdMap.get(o.AccountId).recordTypeId == ConstantVariableHandler.recType_Account_LocationLockerNA ||
+                             AccountIdMap.get(o.AccountId).recordTypeId == ConstantVariableHandler.recType_Account_CompanyLockerEU ||
+                             AccountIdMap.get(o.AccountId).recordTypeId == ConstantVariableHandler.recType_Account_DobbyEU)) ||
+                           (AccountIdMap.get(o.AccountId).Contract_Signed_by_Partner__c == True &&
+                            AccountIdMap.get(o.AccountId).recordTypeId == ConstantVariableHandler.recType_Account_LocationLockerEU)){
+                                o.Contract_signed_by_partner__c = True;
+                                o.Contract_countersigned_by_Amazon__c = True;
+                            }
+                    }
+                    if(AccountIdMap.containsKey(o.AccountId)){
+                        if(AccountIdMap.get(o.AccountId).Contract_Date__c != Null && AccountIdMap.get(o.AccountId).recordTypeId == ConstantVariableHandler.recType_Account_LocationLockerEU){
+                        o.Contract_Date__c = date.valueOf(AccountIdMap.get(o.AccountId).Contract_Date__c);
+                        }
+                    }
+                }
+            }
+        } //end
+        if(!AccountId.isEmpty() && triggerContext == ConstantVariableHandler.beforeInsert){
+            lstAcc = [SELECT id, name, parentid FROM account WHERE parentid != null AND id IN:AccountId];
+            if(!lstAcc.isEmpty()){
+                for(Account acc: lstAcc){
+                    if(!AccountIdToParentId.containsKey(acc.Id)){
+                        AccountIdToParentId.put(acc.Id, acc.parentid);
+                    }
+                }
+                
+            }
+        }
+
+        if(!AccountIdToParentId.isEmpty() && triggerContext == ConstantVariableHandler.beforeInsert){            
+            List<Opportunity> oppList = [Select id, AccountId, Umbrella_Contract__c, Contract_signed_by_partner__c, Contract_countersigned_by_Amazon__c, Contract_Date__c FROM Opportunity WHERE RecordTypeId =: recTypeCompanyLocker AND AccountId IN : AccountIdToParentId.Values()];
+            if(!oppList.isEmpty()){
+                for(Opportunity opp: oppList){
+                    if(opp.Umbrella_Contract__c && (opp.Contract_signed_by_partner__c || opp.Contract_countersigned_by_Amazon__c)){
+                        if(!ParentIdtoOpportunity.containsKey(opp.AccountId)){
+                            ParentIdtoOpportunity.put(opp.AccountId,opp);
+                        }
+                    }
+                }
+            }
+        }
+        try{
+            for(Opportunity opp : newOpp){
+                if(opp.RecordTypeId.equals(recTypeLocationLocker) && String.isNotBlank(opp.AccountId) && triggerContext == ConstantVariableHandler.beforeInsert){
+                    if(AccountIdToParentId.containsKey(opp.AccountId)){
+                        id accid = (id)AccountIdToParentId.get(opp.AccountId); 
+                        if(accid != null && ParentIdtoOpportunity.containsKey(accid)){
+                            Opportunity opn = (Opportunity)ParentIdtoOpportunity.get(accid);
+                            if(opn != null){
+                                opp.Contract_signed_by_partner__c = opn.Contract_signed_by_partner__c;
+                                opp.Contract_countersigned_by_Amazon__c = opn.Contract_countersigned_by_Amazon__c;
+                                system.debug('@@opp.Contract_Date__c:' + opp.Contract_Date__c);
+                                if(opp.Contract_Date__c == null)
+                                    opp.Contract_Date__c = opn.Contract_Date__c;
+                            }
+                        }
+                        
+                    }
+                }
+                
+                //W-001939
+                if(opp.RecordTypeId == ConstantVariableHandler.recTypeoppRenewalOpportunity && triggerContext == ConstantVariableHandler.beforeUpdate){
+                    if(opp.StageName == ConstantVariableHandler.Opp_StageName_PendingApproval && opp.Renewal_Cadence__c != Null){
+                        opp.StageName = ConstantVariableHandler.Opp_StageName_SendAgreement;
+                    }
+                    if(opp.StageName == ConstantVariableHandler.Opp_StageName_SendAgreement && opp.Invoice_Sent_Date__c != Null){
+                        opp.StageName = ConstantVariableHandler.Opp_StageName_PendingAgreement;
+                    }
+                    if(opp.StageName == ConstantVariableHandler.Opp_StageName_PendingAgreement && opp.Invoice_Signed__c != Null){
+                        opp.StageName = ConstantVariableHandler.Opp_StageName_SendInvoice;
+                    }
+                    if(opp.StageName == ConstantVariableHandler.Opp_StageName_SendInvoice && opp.Invoiced_Date__c != Null){
+                        opp.StageName = ConstantVariableHandler.Opp_StageName_PendingPayment;
+                    }
+                    if(opp.StageName == ConstantVariableHandler.Opp_StageName_PendingPayment && opp.Payment_Date__c != Null){
+                        opp.StageName = ConstantVariableHandler.Opp_StageName_ClosedWon;
+                        caseAccountId.add(opp.AccountId);
+                        paymentDateValueMap.put(opp.AccountId,opp.Payment_Date__c);
+                    }
+                }
+            }
+            
+            if(caseAccountId.size() > 0){
+                List<Case> updateCaseRecList = new List<Case>();
+                string caseStatus = ConstantVariableHandler.CS_Status_LeaseUp;
+                List<Case> caseQueryRecList = [select Id, AccountId,Status,Renewal_Approval_email_sent__c,Renewal_approval_Date__c,Price_Breakdown__c,Renewal_Quote_Price_book__c FROM Case
+                                            WHERE AccountId =: caseAccountId AND Status =: caseStatus];
+                if(caseQueryRecList.size() > 0){
+                    for(Case cs : caseQueryRecList){
+                        cs.Status = ConstantVariableHandler.CS_Status_Activated;
+                        cs.Renewal_Approval_email_sent__c = null;
+                        cs.Renewal_approval_Date__c = null;
+                        cs.Is_Renewal_Invoice_Sent__c = false;
+                        cs.Installation_Datetime__c = paymentDateValueMap.get(cs.AccountId);
+                        updateCaseRecList.add(cs);
+                    }
+                }
+                if(updateCaseRecList.size() > 0){
+                    update updateCaseRecList;
+                }
+            }
+        }catch(exception ex){             
+            System.debug( 'Message --> '+ex.getMessage()+' Stack_trace --> '+ex.getStackTraceString() ); 
+        }
+    }
+    
+    
+    //W-001939
+    public static void sendRenewalEmailForNotifcation(List<Opportunity> newOpp, string triggerContext){
+        Map<string,string> EmailForNoticesMap = new Map<string,string>();
+        List<Messaging.SingleEmailMessage> lstEmailMsg = new List<Messaging.SingleEmailMessage>();
+        list<Account> getEmailForNoticesList = new list<Account>();
+        list<contact> insertConList = new list<Contact>();
+        Map<String,Opportunity> oppRecsMap = new Map<string,Opportunity>();
+        
+        String listIDs=Label.List_of_Ids;
+        String[] idList = listIDs.split(',');
+        List<String> recordid = new List<String>(idList);
+        set<Id> accIds = new set<Id>();
+        
+        for(Opportunity opp : newOpp){
+            if(opp.RecordTypeId == ConstantVariableHandler.recTypeoppRenewalOpportunity){
+                if(opp.StageName == ConstantVariableHandler.Opp_StageName_PendingApproval){
+                    accIds.add(opp.AccountId);
+                    oppRecsMap.put(opp.AccountId,opp);
+                }
+            }
+        }
+        
+        if(accIds != null){getEmailForNoticesList = getAccountRec(accIds);}
+        
+        if(getEmailForNoticesList != null){
+            for(Account acc : getEmailForNoticesList){
+                Contact con = new Contact();
+                con.lastName = 'Test';
+                con.accountId = acc.Id;
+                con.email = acc.Email_for_Noticies__c;
+                insertConList.add(con);
+                EmailForNoticesMap.put(acc.Id,acc.Email_for_Noticies__c);
+            }
+            
+            try{
+                if(insertConList != Null){
+                    insert insertConList;
+                }
+            }catch(exception ex){ 
+                System.debug( 'Exception in Contact insert: ErrorMessage -->'+ex.getMessage()+' Stack_trace --> '+ex.getStackTraceString() ); 
+            } 
+            
+            if(insertConList != Null){
+                if(insertConList.size() > 0){
+                    for(Contact con : insertConList){
+                        Messaging.SingleEmailMessage singleEmail = new Messaging.SingleEmailMessage();  
+                        singleEmail.setOrgWideEmailAddressId(recordid[0]);
+                        singleEmail.setSaveAsActivity( true );
+                        singleEmail.setTemplateId(System.Label.ApartmentLocker_RenewalForm);                               
+                        singleEmail.setToAddresses(new List<String>{EmailForNoticesMap.get(con.AccountId)});
+                        singleEmail.settargetObjectId(con.id);   
+                        singleEmail.setWhatId(oppRecsMap.get(con.AccountId).Id);
+                        lstEmailMsg.add(singleEmail);
+                    }
+                    
+                    if(lstEmailMsg != null){
+                        for(Messaging.SendEmailResult ml : Messaging.sendEmail( lstEmailMsg)){
+                            if(ml.isSuccess()){
+                                system.debug('Success in sending mail : ' + ml.success);
+                                
+                            }else{
+                                system.debug('Error in sending mail Outside IF' + ml.getErrors());}
+                        }
+                    }
+                }
+            }
+        }
+        
+        try{
+            if(insertConList != Null){
+                delete insertConList;
+            }
+        }catch(exception ex){ 
+            System.debug( 'Exception in Contact deletion: ErrorMessage -->'+ex.getMessage()+' Stack_trace --> '+ex.getStackTraceString() ); 
+        } 
+        
+    }
+    
+    public static list<Account> getAccountRec(set<Id> accIds){
+        list<Account> accLists = new list<Account>();
+        if(accIds != null && accIds.size() > 0){
+            AccLists = [select Id, Email_for_Noticies__c from Account WHERE Id =: accIds AND Email_for_Noticies__c != null];
+        }
+        return accLists;
+    }
+    // End Of  W-001939
+    
+    /************************************************************************************************
+* Author      : Rakesh Reddy Nimma
+* CreatedDate : 09 DEC 2021
+* Description : Update case hold from opportunity when case hold is marked as true on opportunity for EU & NA
+**************************************************************************************************/
+    public static void updateCaseHoldOnOpp( List<Opportunity> triggerNew, Map<id, Opportunity> oldmap ){
+        Map<Id,opportunity> oppIdMap = new Map<Id,opportunity>();
+        List<case> caseToUpdate = new List<case>();
+        String rtLocationLocker = Schema.sObjectType.Opportunity.getRecordTypeInfosByName().get('Location Locker').getRecordTypeId();
+        String rtDobbyEU = Schema.sObjectType.Opportunity.getRecordTypeInfosByName().get('Dobby Onboarding EU').getRecordTypeId();
+        String rtLocationOnboarding = Schema.sObjectType.Opportunity.getRecordTypeInfosByName().get('Location Onboarding').getRecordTypeid();
+        Boolean isCaseHold = false;
+        string kioskStatus;
+        string kioskSubStatus;
+        try{
+            for(opportunity opp:triggerNew){
+                if(opp.CaseHold__c != oldmap.get(opp.Id).CaseHold__c && 
+                   (opp.RecordTypeId.equals(rtLocationLocker) || opp.RecordTypeId.equals(rtDobbyEU) || opp.RecordTypeId.equals(rtLocationOnboarding))){
+                       oppIdMap.put(opp.Id,opp);
+                       isCaseHold = True;
+                   }
+                //W-001954
+                if(isCaseHold == False){
+                    if(string.isNotBlank(opp.Kiosk_Status__c) && string.isNotBlank(opp.kiosk_Sub_Status__c) && opp.Kiosk_Status__c != oldmap.get(opp.Id).Kiosk_Status__c){
+                        oppIdMap.put(opp.Id,opp);
+                        kioskStatus = opp.Kiosk_Status__c;
+                        kioskSubStatus = opp.kiosk_Sub_Status__c;
+                    }
+                    if(string.isNotBlank(opp.kiosk_Sub_Status__c) && opp.kiosk_Sub_Status__c != oldmap.get(opp.Id).kiosk_Sub_Status__c){
+                        oppIdMap.put(opp.Id,opp);
+                        kioskSubStatus = opp.kiosk_Sub_Status__c;
+                        kioskStatus = 'InService';
+                    }
+                    system.debug('check for W-001954 vlaue = '+kioskSubStatus);
+                } 
+            }
+            if(oppIdMap.size()>0){
+                List<case> csList = [Select id, CaseHold__c,Opportunity__c,Activation_Date__c,Status, RecordTypeId, Decommisioned__c, Cancelled_Reason__c From Case Where Opportunity__c IN : oppIdMap.keyset()];
+                for(case cs:csList){
+                    if(oppIdMap.containsKey(cs.Opportunity__c)){
+                        if(isCaseHold == True){
+                            cs.CaseHold__c = oppIdMap.get(cs.Opportunity__c).CaseHold__c;
+                        }else{
+                            //W-001954
+                            if(cs.RecordTypeId.equals(ConstantVariableHandler.recTypeCaseLockerNA) ||
+                               cs.RecordTypeId.equals(ConstantVariableHandler.recTypeCaseLockerEU) || 
+                               cs.RecordTypeId.equals(ConstantVariableHandler.recTypeCaseOdinEU) ||
+                               cs.RecordTypeId.equals(ConstantVariableHandler.recTypeCaseDobbyEU) ||
+                               cs.RecordTypeId.equals(ConstantVariableHandler.recTypeCaseDobbyNA)){
+                                   if(kioskStatus == 'InService' && kioskSubStatus == 'Normal' && cs.Activation_Date__c == Null){
+                                       cs.Status = ConstantVariableHandler.CS_Status_Activated;
+                                       cs.Activation_Date__c = system.Datetime.now();
+                                   }
+                                   if(kioskSubStatus == 'PendingProvision'){
+                                       cs.Status = ConstantVariableHandler.CS_Status_SetupSoftware;
+                                   }
+                                   if(kioskSubStatus == 'KioskRemoved'){
+                                       cs.Status = ConstantVariableHandler.CS_Status_Closed;
+                                       cs.Cancelled_Reason__c = ConstantVariableHandler.CS_CancelledReason_LockerDecommissioned;
+                                   }
+                               }
+                        }
+                        caseToUpdate.add(cs);
+                    }
+                }
+                if(caseToUpdate.size()>0){Update caseToUpdate;}
+            } 
+        }
+        catch(exception ex){
+            System.debug( 'Message --> '+ex.getMessage()+' Stack_trace --> '+ex.getStackTraceString() ); 
+        }
+    }
+    
+    public static void createQuotesForAptLocker( List<Opportunity> oppRec ){
+        List<SBQQ__Quote__c> quoteList = new List<SBQQ__Quote__c>();
+        SBQQ__Quote__c crtQuote;
+        String recTypeId = Schema.sObjectType.Opportunity.getRecordtypeInfosByName().get('Location Onboarding').getRecordTypeId();
+        Map<ID,String> accId2RecSize = new Map<Id,String>();  
+        Map<String,Map<String,Decimal>> lockerSize2ProdFamily2UnitPrice = new Map<String,Map<String,Decimal>>();       
+        Set<Id> accIds = new Set<Id>();
+        try{
+            
+            For( Opportunity eachOpp : oppRec ){
+                if(eachOpp.recordTypeID == recTypeId)
+                    accIds.add( eachOpp.accountId );
+            }        
+            For( Account eachAcc : [SELECT id,Recommended_Locker_Size__c FROM Account WHERE ID IN : accIDs] ){
+                if( eachAcc.Recommended_Locker_Size__c != null ){
+                    accId2RecSize.put( eachAcc.id, String.ValueOf( eachAcc.Recommended_Locker_Size__c ) );
+                }            
+            }
+            System.debug( 'accId2RecSize --> '+accId2RecSize );
+            For( Pricebookentry eachPbe : [SELECT id,size__c,Product_family__c,UnitPrice FROM Pricebookentry 
+                                            WHERE Pricebook2.name = 'V2' AND Pricebook2.isActive = true 
+                                              AND size__c IN : accId2RecSize.values()
+                                              AND product_family__c IN ( 'Indoor', 'Outdoor' ) ] ){
+                system.debug( 'eachPbe --> '+eachPbe );
+                                              
+                if( lockerSize2ProdFamily2UnitPrice.containsKey( eachPbe.size__c ) ) {
+                    if( !lockerSize2ProdFamily2UnitPrice.get( eachPbe.size__c ).containsKey( eachPbe.Product_family__c ) ){
+                        lockerSize2ProdFamily2UnitPrice.get( eachPbe.size__c ).put( eachPbe.Product_family__c, eachPbe.UnitPrice );
+                    }
+                }else{ lockerSize2ProdFamily2UnitPrice.put( eachPbe.size__c, new Map<String,Decimal>{ eachPbe.Product_family__c => eachPbe.UnitPrice } ); }
+            }/* End of for */
+            System.debug( 'lockerSize2ProdFamily2UnitPrice --> '+lockerSize2ProdFamily2UnitPrice );
+            For( Opportunity eachOpp : oppRec ){
+                system.debug( 'recordtypeId --> ' +eachOpp.recordtypeId );
+                if( eachOpp.recordtypeId == recTypeId ){
+                    crtQuote = new SBQQ__Quote__c();                
+                    crtQuote.SBQQ__Account__c = eachOpp.AccountId;
+                    crtQuote.SBQQ__Primary__c = true;
+                    crtQuote.SBQQ__Opportunity2__c = eachOpp.Id;
+                    crtQuote.SBQQ__PriceBook__c = eachOpp.Pricebook2Id;
+                    if( accId2RecSize.containsKey( eachOpp.AccountId ) && lockerSize2ProdFamily2UnitPrice.containsKey( String.valueOf( accId2RecSize.get( eachOpp.AccountId ) ) ) ){
+                        System.debug( 'In If --> ' );
+                        if( lockerSize2ProdFamily2UnitPrice.get( String.valueOf( accId2RecSize.get( eachOpp.AccountId ) ) ).containsKey( 'Indoor' ) ){
+                            crtQuote.Net_Amount_Indoor__c = lockerSize2ProdFamily2UnitPrice.get( String.valueOf( accId2RecSize.get( eachOpp.AccountId ) ) ).get( 'Indoor' );
+                        } 
+                        if( lockerSize2ProdFamily2UnitPrice.get( String.valueOf( accId2RecSize.get( eachOpp.AccountId ) ) ).containsKey( 'Outdoor' ) ){
+                            crtQuote.Net_Amount_Outdoor__c = lockerSize2ProdFamily2UnitPrice.get( String.valueOf( accId2RecSize.get( eachOpp.AccountId ) ) ).get( 'Outdoor' );
+                        }
+                    }
+                    quoteList.add( crtQuote );            
+                }            
+            }/* End of for */    
+            if( !quoteList.isEmpty() ){ Database.insert( quoteList, true ); }
+            
+        }catch(exception ex){
+            System.debug( 'Exception in createQuotesForAptLocker --> '+ex.getMessage()+' Stack_trace --> '+ex.getStackTraceString() );
+        }                
+    }/* End of method */
+    
+    /************************************************************************************************
+    * Author      : Ravi Mishra
+    * CreatedDate : 08 Aug 2021
+    * Description : Moved PB business logic to APEX due to CPU Limit Exception
+    * #W-001303 
+    *************************************************************************************************/
+    public static void HubCreateOnboardingCaseOnOppInsert( List<Opportunity> lstOpp){ 
+        String rtLocationLocker = Schema.sObjectType.Opportunity.getRecordTypeInfosByName().get('Location Locker').getRecordTypeId();
+        String oppDobRecTypeId = Schema.SObjectType.Opportunity.getRecordTypeInfosByName().get('Dobby Onboarding').getRecordTypeId();
+        String oppDobEURecTypeId = Schema.SObjectType.Opportunity.getRecordTypeInfosByName().get('Dobby Onboarding EU').getRecordTypeId();
+        set<Id> accId = new set<Id>();
+        set<Id> dobbyaccId = new set<Id>();
+        List<Opportunity> lstFilteredOppty = new List<Opportunity>();
+        List<Opportunity> lstFilteredDobbyOppty = new List<Opportunity>();
+        map<Id,Account> mapAccountIdToAccount = new map<Id,Account>();
+        
+        for(Opportunity opp:lstOpp){
+            if(opp.RecordTypeId.equals(rtLocationLocker) && opp.StageName.equals('Consult')){
+                accId.add(opp.AccountId);
+                lstFilteredOppty.add(opp);
+                system.debug('@@lstFilteredOppty:' + lstFilteredOppty);
+            } else if(opp.RecordTypeId.equals(oppDobRecTypeId)){
+                accId.add(opp.AccountId);
+                lstFilteredDobbyOppty.add(opp);  
+                system.debug('@@lstFilteredDobbyOppty:' + lstFilteredDobbyOppty);
+            } else if(opp.RecordTypeId.equals(oppDobEURecTypeId)){ //W-001733
+                accId.add(opp.AccountId);
+                lstFilteredDobbyOppty.add(opp);  
+                system.debug('@@lstFilteredDobbyOppty:' + lstFilteredDobbyOppty);
+            } 
+        }
+        system.debug('@@lstFilteredOppty:' + lstFilteredOppty);
+        if(!accId.isEmpty()){
+            try{
+                for(Account objAcc : [SELECT id, Name, Start_Onboarding_Process__c, On_site_Contact_Email__c FROM Account WHERE Id IN: accId]){
+                    if(!mapAccountIdToAccount.ContainsKey(objAcc.Id)){
+                        mapAccountIdToAccount.put(objAcc.Id, objAcc);
+                    }
+                }
+                system.debug('@@mapAccountIdToAccount:' + mapAccountIdToAccount);
+                if(!mapAccountIdToAccount.isEmpty()){
+                    List<Opportunity> oppList = new List<Opportunity>();
+                    for(Opportunity objOpp : lstFilteredOppty){
+                        System.debug('@@oppnId:'+ objOpp.Id);
+                        if(mapAccountIdToAccount.containsKey(objOpp.AccountId)){                        
+                            if((mapAccountIdToAccount.get(objOpp.AccountId).Start_Onboarding_Process__c.equals('Case'))){
+                                oppList.add(objOpp);System.debug('$$$:'+ mapAccountIdToAccount.get(objOpp.AccountId).Start_Onboarding_Process__c.equals('Case'));
+                            }
+                        }
+                    }
+                    //***#W-001303 */
+                    if(lstFilteredDobbyOppty.size()>0){
+                        for(Opportunity objOpp : lstFilteredDobbyOppty){
+                            System.debug('@@oppnId:'+ objOpp.Id);
+                            if(mapAccountIdToAccount.containsKey(objOpp.AccountId)){                        
+                                if((mapAccountIdToAccount.get(objOpp.AccountId).Start_Onboarding_Process__c.equals('Dobby Case'))){
+                                    oppList.add(objOpp);System.debug('$$$:'+ mapAccountIdToAccount.get(objOpp.AccountId).Start_Onboarding_Process__c.equals('Dobby Case'));
+                                }else if((mapAccountIdToAccount.get(objOpp.AccountId).Start_Onboarding_Process__c.equals('Case'))){ //W-001733
+                                    oppList.add(objOpp);System.debug('$$$:'+ mapAccountIdToAccount.get(objOpp.AccountId).Start_Onboarding_Process__c.equals('Case'));
+                                }
+                            }
+                        }
+                   }
+                    
+                    if(!oppList.isEmpty()){
+                        OpportunityHandler.CreateCase(oppList, mapAccountIdToAccount);system.debug('@@oppList:' + oppList);
+                    }
+                }
+            }catch(exception ex){
+                System.debug( 'Exception in HubCreateOnboardingCaseOnOppInsert: ErrorMessage --> '+ex.getMessage()+' Stack_trace --> '+ex.getStackTraceString() ); 
+            }            
+        }
+    }
+    
+     /************************************************************************************************
+    * Author      : Ravi Mishra
+    * CreatedDate : 08 Aug 2021
+    * Description : Moved PB business logic to APEX due to CPU Limit Exception
+    *************************************************************************************************/
+    public static void HubCreateOnboardingCaseOnUpdateOpp( List<Opportunity> lstOpp, Map<id, Opportunity> oldmap){ 
+        String rtLocationLocker = Schema.sObjectType.Opportunity.getRecordTypeInfosByName().get('Location Locker').getRecordTypeId();
+        set<Id> accId = new set<Id>();
+        List<Opportunity> lstFilteredOpportunity = new List<Opportunity>();
+        map<Id,Account> mapAccountIdToAccount = new map<Id,Account>();
+        
+        for(Opportunity opp:lstOpp){
+            if(opp.RecordTypeId.equals(rtLocationLocker) && opp.StageName.equals('Consult') && oldmap.get(opp.Id).StageName.equals('Pursue')){
+                accId.add(opp.AccountId);
+                lstFilteredOpportunity.add(opp);
+            }
+        }
+        system.debug('@@lstFilteredOpportunity:' + lstFilteredOpportunity);
+        if(!accId.isEmpty()){
+            try{
+                for(Account objAcc : [SELECT id, Name, Start_Onboarding_Process__c, On_site_Contact_Email__c FROM Account WHERE Id IN: accId]){
+                    if(!mapAccountIdToAccount.ContainsKey(objAcc.Id)){
+                        mapAccountIdToAccount.put(objAcc.Id, objAcc);
+                    }
+                    
+                }
+                
+                if(!mapAccountIdToAccount.isEmpty()){
+                    OpportunityHandler.CreateCase(lstFilteredOpportunity, mapAccountIdToAccount);                
+                }
+            }catch(exception ex){
+                System.debug( 'Exception in HubCreateOnboardingCaseOnUpdateOpp: ErrorMessage --> '+ex.getMessage()+' Stack_trace --> '+ex.getStackTraceString() ); 
+            }                
+        }
+    }
+    /************************************************************************************************
+    * Author      : Ravi Mishra
+    * CreatedDate : 08 Aug 2021
+    * Description : Method to create Case
+     #W-001303 
+    *************************************************************************************************/
+    Private static void CreateCase  (List<Opportunity> lstOpp, map<Id,Account> mapAccountIdToAccount){
+        String oppDobEURecTypeId = Schema.SObjectType.Opportunity.getRecordTypeInfosByName().get('Dobby Onboarding EU').getRecordTypeId();
+        String csDobRecTypeId = Schema.SObjectType.Case.getRecordTypeInfosByName().get('Dobby Onboarding NA').getRecordTypeId();
+        List<BusinessHours> objBH = [SELECT Id, Name FROM BusinessHours WHERE name ='Default' LIMIT 1];
+        List<Case> lstCreateCase = new List<Case>();
+        //List<Case> lstCreateDobbyCase = new List<Case>();
+        system.debug('@@lstOpp:' + lstOpp);
+        for(Opportunity objOpp : lstOpp){
+            if(mapAccountIdToAccount.get(objOpp.AccountId).Start_Onboarding_Process__c=='Dobby Case'){
+                system.debug('@@lstOpp:' + objOpp.account.Start_Onboarding_Process__c);
+                system.debug('@@lstOpp:' + lstOpp);
+                Case cs = new case();
+            cs.AccountId = objOpp.AccountId;
+            cs.Account_Onsite_Contact_Mail__c = mapAccountIdToAccount.get(objOpp.AccountId).On_site_Contact_Email__c;
+            if(!objBH.isEmpty())
+                cs.BusinessHoursId = objBH[0].Id;
+            cs.Opportunity__c = objOpp.Id;
+            cs.Origin = 'Opportunity';
+            cs.RecordTypeId = csDobRecTypeId; 
+            cs.Status = 'Schedule consultation';
+            cs.Subject = mapAccountIdToAccount.get(objOpp.AccountId).Name + ' - Dobby Onboarding Case';
+            lstCreateCase.add(cs);
+                
+            }else{
+                system.debug('@@lstOpp:' + objOpp.account.Start_Onboarding_Process__c);
+                system.debug('@@lstOpp:' + lstOpp);
+            Case cs = new case();
+            cs.AccountId = objOpp.AccountId;
+            cs.Account_Onsite_Contact_Mail__c = mapAccountIdToAccount.get(objOpp.AccountId).On_site_Contact_Email__c;
+            if(!objBH.isEmpty())
+                cs.BusinessHoursId = objBH[0].Id;
+            cs.Opportunity__c = objOpp.Id;
+            cs.Origin = 'Opportunity';
+                if(objOpp.RecordTypeId.equals(ConstantVariableHandler.recTypeoppDobbyEU)){ //W-001733
+                    cs.RecordTypeId = ConstantVariableHandler.recTypeCaseDobbyEU; 
+                    cs.Subject = mapAccountIdToAccount.get(objOpp.AccountId).Name + ' - Dobby Onboarding Case';
+                }else{
+                    cs.RecordTypeId = ConstantVariableHandler.recTypeCaseLockerEU; 
+                    cs.Subject = mapAccountIdToAccount.get(objOpp.AccountId).Name + ' - Locker Onboarding Case';
+                }
+            cs.Status = 'Schedule consultation';
+            lstCreateCase.add(cs);
+            } 
+        }
+                
+        if(!lstCreateCase.isEmpty()){
+            
+            try{
+                List<Database.SaveResult> results = Database.insert(lstCreateCase, false); 
+                system.debug('@@lstCreateCase:' + lstCreateCase);
+                for (Database.SaveResult result : results) {
+                    if (!result.isSuccess()){
+                        for (Database.Error err : result.getErrors()){
+                            System.debug('Exception while insert case from opportunityHandler class records : '+ err.getStatusCode() + ' ' + err.getMessage());
+                        }
+                    }       
+                }   
+            }Catch(Exception e){
+                system.debug('Exception while insert case from opportunityHandler class == '+e.getMessage()+' == '+e.getLineNumber());
+            }
+            
+            
+            
+        }
+       
+    }
+    /************************************************************************************************
+    * Author      : Rakesh Reddy Nimma
+    * CreatedDate : 28 April 2022
+    * Description : Contract Parent Opportunity to Parent Account -#W-000873
+    *************************************************************************************************/
+    public static void ContractParenttoChild( List<Opportunity> lstOpp, Map<id, Opportunity> oldmap ){
+        String rtLocationLockerNA = Schema.sObjectType.Opportunity.getRecordTypeInfosByName().get('Company Locker NA').getRecordTypeId();
+        String rtLocationLocker = Schema.sObjectType.Opportunity.getRecordTypeInfosByName().get('Company_Locker').getRecordTypeId();//#W-001482
+        Map<Id,opportunity> accIdOppMap = new Map<Id,opportunity>();
+        List<Account> accRec = new List<Account>();
+        for(opportunity opp:lstOpp){
+            if((opp.RecordTypeId.equals(rtLocationLocker) || opp.RecordTypeId.equals(rtLocationLockerNA)) &&
+               (opp.Contract_signed_by_partner__c !=oldmap.get(opp.Id).Contract_signed_by_partner__c 
+               || opp.Contract_countersigned_by_Amazon__c !=oldmap.get(opp.Id).Contract_countersigned_by_Amazon__c
+               || opp.Umbrella_Contract__c !=oldmap.get(opp.Id).Umbrella_Contract__c && opp.AccountId != null))
+            {
+                accIdOppMap.put(opp.AccountId,opp);
+            }
+        }
+        system.debug('Number of account ids :;::'+accIdOppMap.size());
+        accRec = [Select Id,Contract_Signed_By__c from Account where Id IN:accIdOppMap.keySet()];
+        if(accRec.size() >0){
+            for(account acc : accRec){
+                if(accIdOppMap.get(acc.Id).Contract_signed_by_partner__c == true && accIdOppMap.get(acc.Id).Contract_countersigned_by_Amazon__c == false &&
+                   accIdOppMap.get(acc.Id).Umbrella_Contract__c == true )
+                {
+                    acc.Contract_Signed_By__c = System.Label.AcContractPartner;
+                }
+                else if(accIdOppMap.get(acc.Id).Contract_signed_by_partner__c == true && accIdOppMap.get(acc.Id).Contract_countersigned_by_Amazon__c == true &&
+                        accIdOppMap.get(acc.Id).Umbrella_Contract__c == true )
+                {
+                    acc.Contract_Signed_By__c = System.Label.AcContractBoth;
+                }
+            }
+            database.update(accRec,false);
+        }
+        
+    }
+/************************************************************************************************
+* Author      : SeshaGiri L
+* CreatedDate : 23 Aug 2022
+* Description : #W-001303 Opportunity record type autoupdate to "Dobby Onboarding"  
+*************************************************************************************************/  
+     public static void updateLocationDobbyOpportunity(list<Opportunity> lstOpp){
+        system.debug('updateLocationDobbyAccount===>'+lstOpp);
+            Id oppRecTypeId = Schema.SObjectType.Account.getRecordTypeInfosByName().get('Company').getRecordTypeId();
+            Id oppRecTypeIdLLCDobby = Schema.SObjectType.Opportunity.getRecordTypeInfosByName().get('Dobby Onboarding').getRecordTypeId();
+            String dobbyPricebookID = Label.Dobby_Pricebook_ID;
+                for(Opportunity opp:lstOpp){
+                    //count Parentaccount = mapacc.get(ac.ParentId);
+                    //system.debug('+++++Parent_Account_Pricebook__c'+ opp.Parent_Account_Pricebook__c);
+                    if(opp.Parent_Account_Pricebook__c=='dobby'){
+                    opp.RecordTypeId=oppRecTypeIdLLCDobby;
+                    }
+                   // W-001939
+                    if(opp.RecordTypeId == ConstantVariableHandler.recTypeoppRenewalOpportunity){
+                        if(opp.StageName == ConstantVariableHandler.Opp_StageName_SendRenewalNotice && opp.Renewal_Date__c != Null){
+                            opp.StageName = ConstantVariableHandler.Opp_StageName_PendingApproval;
+                        }
+                    }
+                }
+    } 
+    
+    /************************************************************************************************
+    * Author      : Shruti G
+    * CreatedDate : 20 Dec 2022
+    * Description : Moved from PB to Trigger due to pb exception 
+    *************************************************************************************************/  
+    public static void addDiscountOnOppLineItem(List<Opportunity> triggerNew, Map<id, Opportunity> oldmap){ 
+        try{
+            Map<Id, String> mapOppIdOppDiscount = new Map<Id,String>();
+            List<OpportunityLineItem> lstOppLineItem =new List<OpportunityLineItem>();
+            if(triggerNew != null){
+                for(Opportunity opp : triggerNew) {
+                    if(opp.Discount__c != null) {
+                        mapOppIdOppDiscount.put(opp.Id,String.valueOf(opp.Discount__c));
+                    }
+                }
+            }
+            if(mapOppIdOppDiscount  != null)
+                lstOppLineItem = [Select id, Discount,OpportunityId from OpportunityLineItem where OpportunityId IN : mapOppIdOppDiscount.keySet()];
+            if(lstOppLineItem != null) {
+                for(OpportunityLineItem oppLI : lstOppLineItem) {
+                    if(mapOppIdOppDiscount.containsKey(oppLI.OpportunityId)) {
+                        oppLI.Discount = Decimal.valueOf(mapOppIdOppDiscount.get(oppLI.OpportunityId));
+                    }
+                }
+            }
+        } catch(Exception ex) {
+            System.debug( 'Exception in addDiscountOnOppLineItem: ErrorMessage --> '+ex.getMessage()+' Stack_trace --> '+ex.getStackTraceString() ); 
+        }
+    }
+       
+    /************************************************************************************************
+    * Author      : Biswadip Dey
+    * CreatedDate : 20 March 2023
+    * Description : #W-001226 Created logic to insert Kiosk Status-Substatus tracker
+    *************************************************************************************************/  
+    public static void upsertKioskStatusChange(List<Opportunity> oppNewList, Map<Id, Opportunity> oppOldMap, List<Opportunity> oppOldList){
+        List<Kiosk_StatusSubstatus_Tracker__c> statusChangesListInsert = new List<Kiosk_StatusSubstatus_Tracker__c>(); 
+        List<Kiosk_StatusSubstatus_Tracker__c> statusChangesListUpdate = new List<Kiosk_StatusSubstatus_Tracker__c>(); 
+        Set<String> oldStatusList = new Set<String>();
+        Set<Id> oldOppIdList = new Set<Id>();
+        string  oppId;
+        
+        Map<id,String> oldStatusSubstatus = new Map<id,String>();
+        Map<id,String> newStatusSubstatus = new Map<id,String>();
+        
+        if (oppOldList != null){
+            for(Opportunity oppTemp1 : oppOldList){
+                String tempStr1;
+                tempStr1 = oppTemp1.Kiosk_Status__c + '_' + oppTemp1.kiosk_Sub_Status__c;
+                oldStatusSubstatus.put(oppTemp1.id,tempStr1);
+            }
+            
+        }
+        
+        
+        for(Opportunity oppTemp2 : oppNewList){
+            String tempStr2;
+            tempStr2 = oppTemp2.Kiosk_Status__c + '_' + oppTemp2.kiosk_Sub_Status__c;
+            newStatusSubstatus.put(oppTemp2.id,tempStr2);
+        }
+        
+        try{
+            for(Opportunity oppRec : oppNewList){
+                
+                String tempStatusSubstatus = oppRec.Kiosk_Status__c + '_' + oppRec.kiosk_Sub_Status__c;
+                
+                if(oppOldMap == null || (oppOldMap != null && oppOldMap.containsKey(oppRec.id) && tempStatusSubstatus != oldStatusSubstatus.get(oppRec.id))){
+                    
+                    
+                    
+                    Kiosk_StatusSubstatus_Tracker__c statusChange = new Kiosk_StatusSubstatus_Tracker__c();
+                    
+                    statusChange.Name = oppRec.Id+' status: ' + tempStatusSubstatus;
+                    
+                    BusinessHours bh2 = [SELECT Id FROM BusinessHours WHERE IsDefault=true]; //updated
+                    Double milliseconds2 = BusinessHours.diff(bh2.Id, Datetime.now(), Datetime.now());                 
+                    statusChange.Status_Time__c = (Decimal.valueOf(milliseconds2)).Divide((60*60*1000), 2);
+                    
+                    if (oppOldMap != null && oppOldMap.containsKey(oppRec.id) && tempStatusSubstatus != oldStatusSubstatus.get(oppRec.id)){
+                        statusChange.Status_Previous__c  = oldStatusSubstatus.get(oppRec.id);
+                        
+                        oldStatusList.add(statusChange.Status_Previous__c);
+                        oldOppIdList.add(oppRec.id);
+                    }
+                    statusChange.Opportunity_Number__c = oppRec.Id;
+                    statusChange.Status_Current__c = newStatusSubstatus.get(oppRec.id); 
+                    statusChange.Status_Start_Time__c = system.Datetime.now();
+                    statusChangesListInsert.add(statusChange);
+                    
+                }
+            }
+            
+            // calculate business hours for updated Status
+            if (oldStatusList.size()>0 && oldOppIdList.size()>0) {
+                List<Kiosk_StatusSubstatus_Tracker__c> oldStatusChangeList = [select Id, Name, Status_Start_Time__c,Status_Age__c,Status_Time__c,Status_Current__c,Status_End_Time__c,Status_Days__c,Opportunity_Number__c from Kiosk_StatusSubstatus_Tracker__c where Status_Current__c IN :oldStatusList and Opportunity_Number__c IN :oldOppIdList and Status_End_Time__c=null];
+                BusinessHours bh = [SELECT Id FROM BusinessHours WHERE IsDefault=true];
+                
+                for (Kiosk_StatusSubstatus_Tracker__c oldStatusChangeRec: oldStatusChangeList) {
+                    oldStatusChangeRec.Status_End_Time__c = Datetime.now();
+                    Double milliseconds = BusinessHours.diff(bh.Id, oldStatusChangeRec.Status_Start_Time__c, oldStatusChangeRec.Status_End_Time__c);                 
+                    oldStatusChangeRec.Status_Time__c = (Decimal.valueOf(milliseconds)).Divide((60*60*1000), 2);
+                    oldStatusChangeRec.Status_Age__c = getAge(milliseconds);
+                    oldStatusChangeRec.Status_Days__c = oldStatusChangeRec.Status_Time__c/24;
+                    statusChangesListUpdate.add(oldStatusChangeRec);
+                    
+                }
+            }
+            
+            if(statusChangesListInsert != null){
+                if(statusChangesListInsert.size() > 0){
+                    
+                    Database.insert(statusChangesListInsert);
+                }
+            }
+            if(statusChangesListUpdate!=null){
+                if(statusChangesListUpdate.size() > 0){
+                    
+                    Database.update(statusChangesListUpdate);
+                }
+            }
+        }catch(Exception e){
+            ErrorLogUtility.logApexException(e, null, null);
+        }
+        
+    }
+    @testVisible
+    private static String getAge(Double milliseconds) {
+        
+        Double duration = milliseconds;
+        Double d = Math.floor(duration/86400000); //Get whole days
+        duration -= d*86400000;
+        Double h = Math.floor(duration/3600000); //Get whole hours
+        duration -= h*3600000;
+        Double m = Math.floor(duration/60000);
+        duration -= m*60000;
+        Double s = Math.floor(duration/1000);
+        return d.format()+' days '+h.format()+' hours '+ m.format() + ' minutes ' + s.format() +' seconds';
+    }
+    
+}/* End of class */

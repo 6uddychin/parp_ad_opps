@@ -1,0 +1,47 @@
+<apex:page >
+    <apex:form >
+
+
+         <tr>
+              <td>
+          <apex:commandButton style="color: #367588; background-color: #a9e3ee; border-color: #4cae4c;user-select: none; background-image: none; border: 1px solid transparent; border-radius: 4px; display: inline-block; padding: 6px 12px; margin-bottom: 0; font-size: 14px; font-weight: normal; line-height: 1.42857143; text-align: center; white-space: nowrap; vertical-align: middle; -ms-touch-action: manipulation; touch-action: manipulation;" 
+      action="{!doSubmit}" value="New Advertising Account" onclick="urlOpener('https://accesspoints--dev.sandbox.lightning.force.com/lightning/o/Account/new?count=1&nooverride=1&useRecordTypeCheck=1&navigationLocation=LIST_VIEW&backgroundContext=%2Flightning%2Fpage%2Fhome&recordTypeId=012750000000HPIAA2')"/>
+         </td>
+          <td>
+          <apex:commandButton style="color: #367588; background-color: #A9EED7; border-color: #4cae4c;user-select: none; background-image: none; border: 1px solid transparent; border-radius: 4px; display: inline-block; padding: 6px 12px; margin-bottom: 0; font-size: 14px; font-weight: normal; line-height: 1.42857143; text-align: center; white-space: nowrap; vertical-align: middle; -ms-touch-action: manipulation; touch-action: manipulation;" 
+      action="{!doSubmit}" value="New Advertising Opp" onclick="urlOpener('https://accesspoints--dev.sandbox.lightning.force.com/lightning/o/Opportunity/new?count=1&nooverride=1&useRecordTypeCheck=1&navigationLocation=LIST_VIEW&uid=167587978215514031&backgroundContext=%2Flightning%2Fo%2FOpportunity%2Flist%3FfilterName%3DRecent&recordTypeId=012750000000HPSAA2')"/>
+   </td>
+                  <td>
+          <apex:commandButton style="color: #367588; background-color: #EDCFDA; border-color: #4cae4c;user-select: none; background-image: none; border: 1px solid transparent; border-radius: 4px; display: inline-block; padding: 6px 12px; margin-bottom: 0; font-size: 14px; font-weight: normal; line-height: 1.42857143; text-align: center; white-space: nowrap; vertical-align: middle; -ms-touch-action: manipulation; touch-action: manipulation;" 
+      action="{!doSubmit}" value="New Advertising Deal" onclick="urlOpener('https://airtable.com/appF7lX1vBCzdNqhA/tblsFmIL88newZin3/viwkx3YRMQw9NcU1K?blocks=hide')"/>
+         </td>
+     </tr>
+     <br></br>
+       <br></br>
+             <tr>
+              <td>
+          <apex:commandButton style="color: #367588; background-color: #a9e3ee; border-color: #4cae4c;user-select: none; background-image: none; border: 1px solid transparent; border-radius: 4px; display: inline-block; padding: 6px 12px; margin-bottom: 0; font-size: 14px; font-weight: normal; line-height: 1.42857143; text-align: center; white-space: nowrap; vertical-align: middle; -ms-touch-action: manipulation; touch-action: manipulation;" 
+      action="{!doSubmit}" value="Current & Upcoming Locations" onclick="urlOpener('https://accesspoints--dev.sandbox.lightning.force.com/lightning/r/Report/00O75000000OZlbEAG/view?queryScope=userFolders')"/>
+         </td>
+          <td>
+          <apex:commandButton style="color: #367588; background-color: #A9EED7; border-color: #4cae4c;user-select: none; background-image: none; border: 1px solid transparent; border-radius: 4px; display: inline-block; padding: 6px 12px; margin-bottom: 0; font-size: 14px; font-weight: normal; line-height: 1.42857143; text-align: center; white-space: nowrap; vertical-align: middle; -ms-touch-action: manipulation; touch-action: manipulation;" 
+      action="{!doSubmit}" value="Available Locations" onclick="urlOpener('https://accesspoints--dev.sandbox.lightning.force.com/lightning/o/Opportunity/new?count=1&nooverride=1&useRecordTypeCheck=1&navigationLocation=LIST_VIEW&uid=167587978215514031&backgroundContext=%2Flightning%2Fo%2FOpportunity%2Flist%3FfilterName%3DRecent&recordTypeId=012750000000HPSAA2')"/>
+   </td>
+                  <td>
+          <apex:commandButton style="color: #367588; background-color: #EDCFDA; border-color: #4cae4c;user-select: none; background-image: none; border: 1px solid transparent; border-radius: 4px; display: inline-block; padding: 6px 12px; margin-bottom: 0; font-size: 14px; font-weight: normal; line-height: 1.42857143; text-align: center; white-space: nowrap; vertical-align: middle; -ms-touch-action: manipulation; touch-action: manipulation;" 
+      action="{!doSubmit}" value="Upcoming Locations" onclick="urlOpener('https://accesspoints--dev.sandbox.lightning.force.com/lightning/r/Report/00O75000000OawpEAC/view?queryScope=userFolders')"/>
+         </td>
+     </tr>
+
+
+       </apex:form>
+  <script>
+  function urlOpener(url){
+    open(url);
+}
+  function openURLOpp(){
+      window.open="https://accesspoints--dev.sandbox.lightning.force.com/lightning/o/Opportunity/new?count=1&nooverride=1&useRecordTypeCheck=1&navigationLocation=LIST_VIEW&uid=167587978215514031&backgroundContext=%2Flightning%2Fo%2FOpportunity%2Flist%3FfilterName%3DRecent&recordTypeId=012750000000HPSAA2"
+      
+  }
+  </script>
+  </apex:page>
